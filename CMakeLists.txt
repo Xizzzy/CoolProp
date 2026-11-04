@@ -2065,7 +2065,16 @@ if(COOLPROP_JAVASCRIPT_MODULE)
         "Cannot use visual studio, use MinGW Makefiles generator on windows")
   endif()
 
-  add_definitions(-sDISABLE_EXCEPTION_CATCHING=0)
+  # COOLPROP_WASM_EXCEPTIONS: C++ exceptions as WebAssembly exceptions (-fwasm-exceptions) instead of JavaScript-based
+  # catching, whose invoke_* trampolines go through JavaScript on every call that may throw (most of CoolProp).
+  option(COOLPROP_WASM_EXCEPTIONS "Use native WebAssembly exception handling" OFF)
+  if(COOLPROP_WASM_EXCEPTIONS)
+    add_compile_options(-fwasm-exceptions)
+    set(COOLPROP_EXCEPTION_LINK_FLAGS "-fwasm-exceptions")
+  else()
+    add_definitions(-sDISABLE_EXCEPTION_CATCHING=0)
+    set(COOLPROP_EXCEPTION_LINK_FLAGS "-s DISABLE_EXCEPTION_CATCHING=0")
+  endif()
   add_definitions(-DCOOLPROP_NO_INCBIN)
   # # If you want a monolithic file with no async memory loading, define EMSCRIPTEN_NO_MEMORY_INIT_FILE
   # if(EMSCRIPTEN_NO_MEMORY_INIT_FILE)
@@ -2075,7 +2084,7 @@ if(COOLPROP_JAVASCRIPT_MODULE)
   # endif()
 
   set(CMAKE_EXE_LINKER_FLAGS
-      "-lembind ${EMSCRIPTEN_INIT_FLAG} -s ASSERTIONS=1 -s DISABLE_EXCEPTION_CATCHING=0 -sALLOW_MEMORY_GROWTH=1 -s EXPORT_ES6=1 -s MODULARIZE=1"
+      "-lembind ${EMSCRIPTEN_INIT_FLAG} -s ASSERTIONS=1 ${COOLPROP_EXCEPTION_LINK_FLAGS} -sALLOW_MEMORY_GROWTH=1 -s EXPORT_ES6=1 -s MODULARIZE=1"
   )
   set(CMAKE_BUILD_TYPE Release)
 
