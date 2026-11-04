@@ -386,7 +386,7 @@ def combine_json(root_dir):
         
         master = []
 
-        for file in glob.glob(os.path.join(root_dir, 'dev', 'fluids', '*.json')):
+        for file in sorted(glob.glob(os.path.join(root_dir, 'dev', 'fluids', '*.json'))):
 
             path, file_name = os.path.split(file)
             fluid_name = file_name.split('.')[0]
@@ -426,7 +426,7 @@ def combine_json(root_dir):
         print('incomp JSON need packaging')
         master = []
 
-        for file in glob.glob(os.path.join(root_dir, 'dev', 'incompressible_liquids', 'json', '*.json')):
+        for file in sorted(glob.glob(os.path.join(root_dir, 'dev', 'incompressible_liquids', 'json', '*.json'))):
 
             path, file_name = os.path.split(file)
             fluid_name = file_name.split('.')[0]
