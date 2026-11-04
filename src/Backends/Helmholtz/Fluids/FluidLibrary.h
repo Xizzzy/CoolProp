@@ -1249,6 +1249,9 @@ class JSONFluidLibrary
                         CoolPropFluid fluid = get(it->second);
                         // Remove all the residual contributions to the Helmholtz energy
                         fluid.EOSVector[0].alphar.empty_the_EOS();
+                        // ... and the superancillaries, which are the multiparameter EOS's saturation curves (shared
+                        // with every copy of it, caloric caches included): the cubic has its own saturation curve
+                        fluid.EOSVector[0].set_superancillaries_str("");
                         // Get the parameters for the cubic EOS
                         CoolPropDbl Tc = fluid.EOSVector[0].reduce.T;
                         CoolPropDbl pc = fluid.EOSVector[0].reduce.p;
