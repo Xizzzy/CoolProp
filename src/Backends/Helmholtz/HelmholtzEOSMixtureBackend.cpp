@@ -523,9 +523,6 @@ void HelmholtzEOSMixtureBackend::calc_change_EOS(const std::size_t i, const std:
         } else {
             throw ValueError(format("EOS name [%s] is invalid; valid options are SRK, Peng-Robinson, XiangDeiters", EOS_name.c_str()));
         }
-        // The superancillaries are the replaced EOS's saturation curves (shared with every copy of it, caloric caches
-        // included): the new residual part has its own, so this component is solved without them
-        EOS.set_superancillaries_str("");
     } else {
         throw ValueError(format("Index [%d] is invalid", i));
     }
