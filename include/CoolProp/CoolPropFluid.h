@@ -454,9 +454,13 @@ class EquationOfState
 
     /// Set the placeholder string for the superancillaries to allow for lazy construction, particularly important in debug builds
     void set_superancillaries_str(const std::string& s) {
+        superancillaries.reset();
+        superancillaries_lazy.reset();
+        if (s.empty()) {
+            return;  // no superancillaries: get_superanc() returns nullptr
+        }
         superancillaries_lazy = std::make_shared<LazySuperAncillary>();
         superancillaries_lazy->json = s;
-        superancillaries.reset();
         // Do the construction greedily by default, but allow it to be lazy if you want
 #if !defined(LAZY_LOAD_SUPERANCILLARIES)
         get_superanc();
