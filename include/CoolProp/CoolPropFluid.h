@@ -18,6 +18,7 @@
 #include <map>
 #include <variant>
 #include <optional>
+#include <mutex>
 #include <cassert>
 #include <iterator>
 #include "Eigen/Core"
@@ -403,7 +404,16 @@ class EquationOfState
     using SuperAncillary_t = superancillary::SuperAncillary<std::vector<double>>;
 
    private:
-    std::string superancillaries_str;
+    /// The superancillaries' JSON until they are built, and once built the superancillaries themselves: one holder
+    /// shared by every copy of this EOS (the library's, each AbstractState's), so a lazy build happens once per fluid,
+    /// not once per copy.
+    struct LazySuperAncillary
+    {
+        std::string json;
+        std::once_flag built;
+        std::shared_ptr<SuperAncillary_t> value;
+    };
+    std::shared_ptr<LazySuperAncillary> superancillaries_lazy;
     std::shared_ptr<SuperAncillary_t> superancillaries;  ///< The superancillaries
 
    public:
@@ -431,15 +441,22 @@ class EquationOfState
     /// The shared_ptr is constructed lazily on first call and then shared among all
     /// copies of this EOS object, making CoolPropFluid copying O(1).
     std::shared_ptr<SuperAncillary_t> get_superanc() {
-        if (!superancillaries && !superancillaries_str.empty()) {
-            superancillaries = std::make_shared<SuperAncillary_t>(superancillaries_str);
+        if (!superancillaries && superancillaries_lazy) {
+            LazySuperAncillary& lazy = *superancillaries_lazy;
+            std::call_once(lazy.built, [&lazy]() {
+                lazy.value = std::make_shared<SuperAncillary_t>(lazy.json);
+                std::string().swap(lazy.json);  // built: its JSON is not needed any more
+            });
+            superancillaries = lazy.value;
         }
         return superancillaries;
     }
 
     /// Set the placeholder string for the superancillaries to allow for lazy construction, particularly important in debug builds
     void set_superancillaries_str(const std::string& s) {
-        superancillaries_str = s;
+        superancillaries_lazy = std::make_shared<LazySuperAncillary>();
+        superancillaries_lazy->json = s;
+        superancillaries.reset();
         // Do the construction greedily by default, but allow it to be lazy if you want
 #if !defined(LAZY_LOAD_SUPERANCILLARIES)
         get_superanc();
