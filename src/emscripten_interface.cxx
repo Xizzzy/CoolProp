@@ -52,8 +52,9 @@ std::vector<double> js_array_to_vec(const val& arr) {
 }  // namespace
 
 // Catch raw host exceptions before returning across the JavaScript/C++ boundary,
-// so native cleanup runs and failed fluid requests remain retryable.
-EM_JS(EM_VAL, invoke_fluid_data_provider, (EM_VAL provider, EM_VAL file), {
+// so native cleanup runs and failed fluid requests remain retryable. (Not named invoke_*: Emscripten
+// takes imports with that prefix for its JavaScript exception-handling trampolines.)
+EM_JS(EM_VAL, call_fluid_data_provider, (EM_VAL provider, EM_VAL file), {
     try {
         const bytes = Emval.toValue(provider)(Emval.toValue(file));
         if (!(bytes instanceof Uint8Array)) {
@@ -78,7 +79,7 @@ void set_fluid_data_provider_js(val f) {
     }
     CoolProp::set_fluid_data_provider([f](const std::string& file) -> std::string {
         val filename(file);
-        val result = val::take_ownership(invoke_fluid_data_provider(f.as_handle(), filename.as_handle()));
+        val result = val::take_ownership(call_fluid_data_provider(f.as_handle(), filename.as_handle()));
         if (result.hasOwnProperty("error")) {
             throw CoolProp::ValueError(result["error"].as<std::string>());
         }
