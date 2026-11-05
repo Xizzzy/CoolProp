@@ -2083,8 +2083,11 @@ if(COOLPROP_JAVASCRIPT_MODULE)
   #   set(EMSCRIPTEN_INIT_FLAG "--memory-init-file 1")
   # endif()
 
+  # stackSave / stackRestore are exported so that a caller can put the stack back after catching a C++ exception
+  # in JavaScript: the exception leaves the module's stack pointer where it was thrown (32 B to ~3 KB a time of the
+  # 64 KB stack), and a few dozen such exceptions overrun the stack into the module's data for good.
   set(CMAKE_EXE_LINKER_FLAGS
-      "-lembind ${EMSCRIPTEN_INIT_FLAG} -s ASSERTIONS=1 ${COOLPROP_EXCEPTION_LINK_FLAGS} -sALLOW_MEMORY_GROWTH=1 -s EXPORT_ES6=1 -s MODULARIZE=1"
+      "-lembind ${EMSCRIPTEN_INIT_FLAG} -s ASSERTIONS=1 ${COOLPROP_EXCEPTION_LINK_FLAGS} -sALLOW_MEMORY_GROWTH=1 -s EXPORT_ES6=1 -s MODULARIZE=1 -sEXPORTED_RUNTIME_METHODS=stackSave,stackRestore"
   )
   set(CMAKE_BUILD_TYPE Release)
 
