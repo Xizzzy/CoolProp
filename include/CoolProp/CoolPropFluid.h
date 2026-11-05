@@ -429,7 +429,7 @@ class EquationOfState
       acentric,          ///< The acentric factor \f$ \omega = -log_{10}\left(\frac{p_s(T/T_c=0.7)}{p_c}\right)-1\f$
       Ttriple,           ///< Triple point temperature (K)
       ptriple;           ///< Triple point pressure (Pa)
-    bool pseudo_pure;    ///< Is a pseudo-pure fluid (true) or pure fluid (false)
+    bool pseudo_pure = false;  ///< Is a pseudo-pure fluid (true) or pure fluid (false)
     ResidualHelmholtzContainer alphar;  ///< The residual Helmholtz energy
     IdealHelmholtzContainer alpha0;     ///< The ideal Helmholtz energy
     std::string BibTeX_EOS,             ///< The bibtex key for the equation of state
