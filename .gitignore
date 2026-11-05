@@ -96,3 +96,7 @@ cppcheck.txt
 # bv (beads viewer) local config and caches
 .bv/
 .superpowers/
+
+/dev/fluids_cbor/
+/include/fluid_index_CBOR.h
+/dev/external_fluids_check/results/
