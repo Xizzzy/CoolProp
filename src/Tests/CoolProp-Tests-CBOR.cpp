@@ -1,7 +1,7 @@
 // Byte-equivalence gate: the embedded CBOR blob
 // must decode to exactly the source dev/all_fluids.json (value-equality). Catches
 // encoder/decoder drift (cbor2/nlohmann version bumps) and staleness.
-#if defined(ENABLE_CATCH)
+#if defined(ENABLE_CATCH) && !defined(COOLPROP_EXTERNAL_FLUIDS)
 #    include <catch2/catch_all.hpp>
 #    include <fstream>
 #    include <sstream>

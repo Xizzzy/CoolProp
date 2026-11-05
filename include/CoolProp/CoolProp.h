@@ -17,10 +17,21 @@ You might want to start by looking at CoolProp.h
 #define CoolProp_H
 
 #include <string>
+#include <functional>
 #include <vector>
 #include "CoolProp/DataStructures.h"
 
 namespace CoolProp {
+
+/** Select on-demand fluid loading before the first fluid-library access (including FluidsList).
+ * The synchronous provider returns the raw CBOR object for the indexed file name.
+ * An empty function selects embedded data, unless built with COOLPROP_EXTERNAL_FLUIDS.
+ * Once loading starts, replacing or clearing the provider throws ValueError.
+ * Provider/parse failures leave that fluid pending for retry. Providers may query
+ * the index or other fluids, but must not recursively request the same fluid.
+ */
+void set_fluid_data_provider(std::function<std::string(const std::string& file)> provider);
+
 
 /// Return a value that does not depend on the thermodynamic state - this is a convenience function that does the call PropsSI(Output, "", 0, "", 0, FluidName)
 /// @param FluidName The fluid name

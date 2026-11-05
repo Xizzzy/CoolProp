@@ -3589,6 +3589,8 @@ TEST_CASE_METHOD(SuperAncillaryOnFixture, "Check superancillary functions are av
     }
 };
 
+// This test inspects the compiled-in payload, which external-only builds omit.
+#ifndef COOLPROP_EXTERNAL_FLUIDS
 extern "C"
 {
     extern unsigned char gall_fluids_CBORData[];
@@ -3830,6 +3832,8 @@ TEST_CASE("Superancillary source_eos_hash matches current EOS at bit level", "[a
     }
     CHECK(fluids_checked > 0);
 };
+
+#endif  // COOLPROP_EXTERNAL_FLUIDS
 
 TEST_CASE_METHOD(SuperAncillaryOnFixture, "Superancillary eval matches extended-precision check points for all fluids", "[ancillary]") {
     // Per-point tolerance comes from fastchebpure's own reported (SA)/(mp) ratio:

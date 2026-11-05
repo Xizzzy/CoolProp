@@ -22,6 +22,7 @@
 /// *********************************************************************************
 
 #    include <emscripten/bind.h>
+#    include <emscripten/em_js.h>
 #    include <emscripten/val.h>
 using namespace emscripten;
 
@@ -50,8 +51,48 @@ std::vector<double> js_array_to_vec(const val& arr) {
 }
 }  // namespace
 
+// Catch raw host exceptions before returning across the JavaScript/C++ boundary,
+// so native cleanup runs and failed fluid requests remain retryable.
+EM_JS(EM_VAL, invoke_fluid_data_provider, (EM_VAL provider, EM_VAL file), {
+    try {
+        const bytes = Emval.toValue(provider)(Emval.toValue(file));
+        if (!(bytes instanceof Uint8Array)) {
+            return Emval.toHandle({error: "Fluid data provider must return Uint8Array"});
+        }
+        // Own the bytes before allocating native memory, which may grow the heap
+        // and detach a Uint8Array returned as a view into WebAssembly memory.
+        return Emval.toHandle({data: new Uint8Array(bytes)});
+    } catch (error) {
+        return Emval.toHandle({error: "JavaScript fluid data provider threw"});
+    }
+});
+
+// The captured val keeps the host function alive for the provider's lifetime.
+void set_fluid_data_provider_js(val f) {
+    if (f.isNull() || f.isUndefined()) {
+        CoolProp::set_fluid_data_provider({});
+        return;
+    }
+    if (f.typeOf().as<std::string>() != "function") {
+        throw CoolProp::ValueError("Fluid data provider must be a function returning Uint8Array");
+    }
+    CoolProp::set_fluid_data_provider([f](const std::string& file) -> std::string {
+        val filename(file);
+        val result = val::take_ownership(invoke_fluid_data_provider(f.as_handle(), filename.as_handle()));
+        if (result.hasOwnProperty("error")) {
+            throw CoolProp::ValueError(result["error"].as<std::string>());
+        }
+        val bytes = result["data"];
+        std::string data(bytes["byteLength"].as<std::size_t>(), '\0');
+        val destination = val(typed_memory_view(data.size(), reinterpret_cast<unsigned char*>(data.data())));
+        destination.call<void>("set", bytes);
+        return data;
+    });
+}
+
 // Binding code
 EMSCRIPTEN_BINDINGS(coolprop_bindings) {
+    function("set_fluid_data_provider_js", &set_fluid_data_provider_js);
     function("F2K", &F2K);
     function("Props1SI", &CoolProp::Props1SI);
     function("PropsSI", &CoolProp::PropsSI);

@@ -7,6 +7,9 @@
 #include "CoolProp/detail/json.h"
 #include "FluidLibraryFactories.h"
 #include <memory>
+#include <functional>
+#include <mutex>
+#include <set>
 using std::shared_ptr;
 
 #include <map>
@@ -36,6 +39,16 @@ class JSONFluidLibrary
     std::vector<std::string> name_vector;
     std::map<std::string, std::size_t> string_to_index_map;
     bool _is_empty;
+    mutable std::recursive_mutex mutex;
+    std::function<std::string(const std::string&)> data_provider;
+    std::map<std::size_t, std::string> pending;
+    std::set<std::size_t> loading;
+
+    CoolPropFluid parse_fluid(const nlohmann::json& fluid_json);
+    void register_identifiers(const CoolPropFluid& fluid, std::size_t index);
+    void insert_fluid(const nlohmann::json& fluid_json, CoolPropFluid fluid, std::size_t index);
+    /// Called with mutex held; failures leave the reserved slot pending.
+    void ensure_fluid_loaded(std::size_t index);
 
    public:
     /// Parse the contributions to the residual Helmholtz energy
@@ -1192,6 +1205,7 @@ class JSONFluidLibrary
 
         };
     bool is_empty() {
+        std::lock_guard<std::recursive_mutex> lock(mutex);
         return _is_empty;
     };
 
@@ -1203,11 +1217,16 @@ class JSONFluidLibrary
 
     void add_one(const nlohmann::json& fluid_json);
 
+    /// Reserve the ordered baseline slots without parsing any fluid data.
+    void load_index(const nlohmann::json& index, std::function<std::string(const std::string&)> provider);
+
     std::string get_JSONstring(const std::string& key) {
+        std::lock_guard<std::recursive_mutex> lock(mutex);
         // Try to find it
         auto it = string_to_index_map.find(key);
         if (it != string_to_index_map.end()) {
 
+            ensure_fluid_loaded(it->second);
             auto it2 = JSONstring_map.find(it->second);
             if (it2 != JSONstring_map.end()) {
                 // Wrap the stored single-fluid JSON object in a one-element array
@@ -1227,6 +1246,7 @@ class JSONFluidLibrary
     @param key Either a CAS number or the name (CAS number should be preferred)
     */
     CoolPropFluid get(const std::string& key) {
+        std::lock_guard<std::recursive_mutex> lock(mutex);
         // Try to find it
         auto it = string_to_index_map.find(key);
         // If it is found
@@ -1321,6 +1341,8 @@ class JSONFluidLibrary
     @param key The index of the fluid in the map
     */
     CoolPropFluid get(std::size_t key) {
+        std::lock_guard<std::recursive_mutex> lock(mutex);
+        ensure_fluid_loaded(key);
         // Try to find it
         auto it = fluid_map.find(key);
         // If it is found
@@ -1333,6 +1355,7 @@ class JSONFluidLibrary
     void set_fluid_enthalpy_entropy_offset(const std::string& fluid, double delta_a1, double delta_a2, const std::string& ref);
     /// Return a comma-separated list of fluid names
     std::string get_fluid_list() {
+        std::lock_guard<std::recursive_mutex> lock(mutex);
         return strjoin(name_vector, get_config_string(LIST_STRING_DELIMITER));
     };
 };

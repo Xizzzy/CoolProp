@@ -32,6 +32,11 @@ set(CMAKE_INSTALL_PREFIX
 # to suit, or just leave as defaults. #
 #######################################
 
+option(COOLPROP_EXTERNAL_FLUIDS "Require a fluid data provider; omit embedded fluid data" OFF)
+if(COOLPROP_EXTERNAL_FLUIDS)
+  add_compile_definitions(COOLPROP_EXTERNAL_FLUIDS)
+endif()
+
 option(COOLPROP_STATIC_LIBRARY "Build CoolProp as a static library (.lib, .a)"
        OFF)
 

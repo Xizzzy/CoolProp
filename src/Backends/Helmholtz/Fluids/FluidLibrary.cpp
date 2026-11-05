@@ -6,6 +6,9 @@
 
 #include "Backends/Helmholtz/HelmholtzEOSBackend.h"
 
+#include "fluid_index_CBOR.h"
+
+#ifndef COOLPROP_EXTERNAL_FLUIDS
 #if defined(COOLPROP_NO_INCBIN)
 #    define INCBIN_CONST
 #    define INCBIN_ALIGN
@@ -22,10 +25,22 @@
 INCBIN(all_fluids_CBOR, "all_fluids.cbor");
 #    endif
 #endif
+#endif  // COOLPROP_EXTERNAL_FLUIDS
 
 namespace CoolProp {
 
 static JSONFluidLibrary library;
+static std::mutex provider_mutex;
+static std::function<std::string(const std::string&)> fluid_data_provider;
+static bool library_loading_started = false;
+
+void set_fluid_data_provider(std::function<std::string(const std::string&)> provider) {
+    std::lock_guard<std::mutex> lock(provider_mutex);
+    if (library_loading_started) {
+        throw ValueError("Cannot change the fluid data provider after fluid library loading has started");
+    }
+    fluid_data_provider = std::move(provider);
+}
 
 void load();
 
@@ -44,11 +59,23 @@ static void ensure_library_loaded() {
 }
 
 void load() {
+    std::lock_guard<std::mutex> lock(provider_mutex);
+#ifdef COOLPROP_EXTERNAL_FLUIDS
+    if (!fluid_data_provider) {
+        throw ValueError("COOLPROP_EXTERNAL_FLUIDS requires set_fluid_data_provider before loading the fluid library");
+    }
+#endif
+    library_loading_started = true;
     if (getenv("COOLPROP_DISABLE_SUPERANCILLARIES_ENTIRELY")) {
         std::cout << "CoolProp: superancillaries have been disabled because the COOLPROP_DISABLE_SUPERANCILLARIES_ENTIRELY environment variable has "
                      "been defined"
                   << '\n';
     }
+    if (fluid_data_provider) {
+        library.load_index(cpjson::from_cbor(fluid_index_CBOR, sizeof(fluid_index_CBOR)), fluid_data_provider);
+        return;
+    }
+#ifndef COOLPROP_EXTERNAL_FLUIDS
     // Let a CBOR-decode failure propagate (it did, as a parse error, before this
     // migration): under std::call_once a thrown load() leaves the once-flag unset
     // so the error surfaces and a later call can retry, rather than silently
@@ -59,12 +86,15 @@ void load() {
     } catch (std::exception& e) {
         std::cout << e.what() << '\n';
     }
+#endif
 }
 
 void JSONFluidLibrary::set_fluid_enthalpy_entropy_offset(const std::string& fluid, double delta_a1, double delta_a2, const std::string& ref) {
+    std::lock_guard<std::recursive_mutex> lock(mutex);
     // Try to find it
     auto it = string_to_index_map.find(fluid);
     if (it != string_to_index_map.end()) {
+        ensure_fluid_loaded(it->second);
         auto it2 = fluid_map.find(it->second);
         // If it is found
         if (it2 != fluid_map.end()) {
@@ -138,6 +168,7 @@ void JSONFluidLibrary::add_many(const std::string& JSON_string) {
 };
 
 void JSONFluidLibrary::add_many(const nlohmann::json& listing) {
+    std::lock_guard<std::recursive_mutex> lock(mutex);
     if (!listing.is_array()) {
         add_one(listing);
         return;
@@ -147,31 +178,17 @@ void JSONFluidLibrary::add_many(const nlohmann::json& listing) {
     }
 };
 
-void JSONFluidLibrary::add_one(const nlohmann::json& fluid_json) {
-    _is_empty = false;
-
-    // The variable index is initialized to the size of the fluid_map.
-    // Since the first fluid_map key equals zero (0), index is initialized to the key
-    // value for the next fluid to be added. (e.g. fluid_map[0..140]; index = 141 )
-    std::size_t index = fluid_map.size();
-
-    CoolPropFluid fluid;  // create a new CoolPropFluid object
-
-    // Assign the fluid properties based on the passed in fluid_json
-    // =============================================================
-    // Parse out Fluid name
-    fluid.name = fluid_json.at("INFO").at("NAME").get<std::string>();
-
-    // Push the fluid name onto the name_vector used for returning the full list of library fluids
-    // If it is found that this fluid already exists in the library, it will be popped back off below.
-    name_vector.push_back(fluid.name);
-
+CoolPropFluid JSONFluidLibrary::parse_fluid(const nlohmann::json& fluid_json) {
+    CoolPropFluid fluid;
     try {
+        fluid.name = fluid_json.at("INFO").at("NAME").get<std::string>();
+        if (fluid.name.empty()) throw ValueError("Fluid name must not be empty");
         // CAS number
         if (!fluid_json.at("INFO").contains("CAS")) {
             throw ValueError(format("fluid [%s] does not have \"CAS\" member", fluid.name.c_str()));
         }
         fluid.CAS = fluid_json.at("INFO").at("CAS").get<std::string>();
+        if (fluid.CAS.empty()) throw ValueError("Fluid CAS must not be empty");
 
         // REFPROP alias
         if (!fluid_json.at("INFO").contains("REFPROP_NAME")) {
@@ -236,11 +253,15 @@ void JSONFluidLibrary::add_one(const nlohmann::json& fluid_json) {
         parse_states(fluid_json.at("STATES"), fluid);
 
         if (get_debug_level() > 5) {
-            std::cout << format("Loading fluid %s with CAS %s; %d fluids loaded\n", fluid.name.c_str(), fluid.CAS.c_str(), index);
+            std::cout << format("Loading fluid %s with CAS %s\n", fluid.name.c_str(), fluid.CAS.c_str());
         }
 
-        // EOS
-        parse_EOS_listing(fluid_json.at("EOS"), fluid);
+        // Reject an empty EOS before downstream parsers access EOSVector[0].
+        const auto& eos = fluid_json.at("EOS");
+        if (!eos.is_array() || eos.empty()) {
+            throw ValueError("EOS must be a non-empty array");
+        }
+        parse_EOS_listing(eos, fluid);
 
         // Validate the fluid
         validate(fluid);
@@ -276,97 +297,97 @@ void JSONFluidLibrary::add_one(const nlohmann::json& fluid_json) {
             parse_transport(fluid_json.at("TRANSPORT"), fluid);
         }
 
-        // If the fluid is ok...
-
-        // First check that none of the identifiers are already present
-        // ===============================================================
-        // Remember that index is already initialized to fluid_map.size() = max index + 1.
-        // If the new fluid name, CAS, or aliases are found in the string_to_index_map, then
-        // the fluid is already in the fluid_map, so reset index to it's key.
-
-        if (string_to_index_map.find(fluid.CAS) != string_to_index_map.end()) {
-            index = string_to_index_map.find(fluid.CAS)->second;  //if CAS found, grab index
-        } else if (string_to_index_map.find(fluid.name) != string_to_index_map.end()) {
-            index = string_to_index_map.find(fluid.name)->second;  // if name found, grab index
-        } else if (string_to_index_map.find(upper(fluid.name)) != string_to_index_map.end()) {
-            index = string_to_index_map.find(upper(fluid.name))->second;  // if uppercase name found, grab index
-        } else {
-            // Check the aliases
-            for (const auto& alias : fluid.aliases) {
-                if (string_to_index_map.find(alias) != string_to_index_map.end()) {
-                    index = string_to_index_map.find(alias)->second;  // if alias found, grab index
-                    break;
-                }
-                if (string_to_index_map.find(upper(alias)) != string_to_index_map.end()) {  // if ALIAS found, grab index
-                    index = string_to_index_map.find(upper(alias))->second;
-                    break;
-                }
-            }
-        }
-
-        bool fluid_exists = false;  // Initialize flag for doing replace instead of add
-
-        if (index != fluid_map.size()) {               // Fluid already in list if index was reset to something < fluid_map.size()
-            fluid_exists = true;                       //   Set the flag for replace
-            name_vector.pop_back();                    //   Pop duplicate name off the back of the name vector; otherwise it keeps growing!
-            if (!get_config_bool(OVERWRITE_FLUIDS)) {  // Throw exception if replacing fluids is not allowed
-                throw ValueError(format("Cannot load fluid [%s:%s] because it is already in library; index = [%i] of [%i]; Consider enabling the "
-                                        "config boolean variable OVERWRITE_FLUIDS",
-                                        fluid.name.c_str(), fluid.CAS.c_str(), index, fluid_map.size()));
-            }
-        }
-
-        // index now holds either
-        //    1. the index of a fluid that's already present, in which case it will be overwritten, or
-        //    2. the fluid_map.size(), in which case a new entry will be added to the list
-
-        // Add/Replace index->fluid mapping
-        // If the fluid index exists, the [] operator replaces the existing entry with the new fluid;
-        //    However, since fluid is a custom type, the old entry must be erased first to properly
-        //    release the memory before adding in the new fluid object at the same location (index)
-        if (fluid_exists) fluid_map.erase(fluid_map.find(index));
-        // if not, it will add the (index,fluid) pair to the map using the new index value (fluid_map.size())
-        fluid_map[index] = fluid;
-
-        // Add/Replace index->JSONstring mapping to easily pull out if the user wants it
-        // Convert fuid_json to a string and store it in the map at index.
-        // if the fluid index exists, the [] operator replaces the existing entry with the new JSONstring;
-        //    However, since fluid_json is a custom type, the old entry must be erased first to properly
-        //    release the memory before adding in the new fluid object at the same location (index)
-        if (fluid_exists) JSONstring_map.erase(JSONstring_map.find(index));
-        // if not, it will add the new (index,JSONstring) pair to the map.
-        JSONstring_map[index] = fluid_json.dump();
-
-        // Add/Replace CAS->index mapping
-        // This map helps find the index of a fluid in the fluid_map given a CAS string
-        // If the CAS string exists, the [] operator will replace index with an updated index number;
-        // if not, it will add a new (CAS,index) pair to the map.
-        string_to_index_map[fluid.CAS] = index;
-
-        // Add/Replace name->index mapping
-        // This map quickly finds the index of a fluid in the fluid_map given its name string
-        // Again, the map [] operator replaces if the alias is found, adds the new (name,index) pair if not
-        string_to_index_map[fluid.name] = index;
-
-        // Add/Replace the aliases->index mapping
-        // This map quickly finds the index of a fluid in the fluid_map given an alias string
-        // Again, the map [] operator replaces if the alias is found, adds the new (alias,index) pair if not
-        for (const auto& alias : fluid.aliases) {
-            string_to_index_map[alias] = index;
-
-            // Add uppercase alias for EES compatibility
-            string_to_index_map[upper(alias)] = index;
-        }
-
-        //If Debug level set >5 print fluid name and total size of fluid_map
-        if (get_debug_level() > 5) {
-            std::cout << format("Loaded fluid: %s - Number of fluids = %d\n", fluid.name, fluid_map.size());
-        }
-
+        return fluid;
     } catch (const std::exception& e) {
         throw ValueError(format("Unable to load fluid [%s] due to error: %s", fluid.name.c_str(), e.what()));
     }
-};
+}
+
+void JSONFluidLibrary::register_identifiers(const CoolPropFluid& fluid, std::size_t index) {
+    // Keep the embedded and indexed lookup keys identical (including alias case variants).
+    string_to_index_map[fluid.CAS] = index;
+    string_to_index_map[fluid.name] = index;
+    for (const auto& alias : fluid.aliases) {
+        string_to_index_map[alias] = index;
+        string_to_index_map[upper(alias)] = index;
+    }
+}
+
+void JSONFluidLibrary::insert_fluid(const nlohmann::json& fluid_json, CoolPropFluid fluid, std::size_t index) {
+    // Serialize before publishing the parsed object, so parse/serialization errors are retryable.
+    std::string json = fluid_json.dump();
+    fluid_map[index] = std::move(fluid);
+    JSONstring_map[index] = std::move(json);
+    pending.erase(index);
+    _is_empty = false;
+}
+
+void JSONFluidLibrary::add_one(const nlohmann::json& fluid_json) {
+    std::lock_guard<std::recursive_mutex> lock(mutex);
+    CoolPropFluid fluid = parse_fluid(fluid_json);
+    std::size_t index = name_vector.size();
+    auto find_index = [&](const std::string& key) {
+        auto it = string_to_index_map.find(key);
+        if (it == string_to_index_map.end()) return false;
+        index = it->second;
+        return true;
+    };
+    if (!find_index(fluid.CAS) && !find_index(fluid.name) && !find_index(upper(fluid.name))) {
+        for (const auto& alias : fluid.aliases) {
+            if (find_index(alias) || find_index(upper(alias))) break;
+        }
+    }
+    if (index != name_vector.size() && !get_config_bool(OVERWRITE_FLUIDS)) {
+        throw ValueError(format("Unable to load fluid [%s] due to error: Cannot load fluid [%s:%s] because it is already in library; "
+                                "index = [%i] of [%i]; Consider enabling the config boolean variable OVERWRITE_FLUIDS",
+                                fluid.name.c_str(), fluid.name.c_str(), fluid.CAS.c_str(), index, name_vector.size()));
+    }
+    const std::string name = fluid.name;
+    register_identifiers(fluid, index);
+    insert_fluid(fluid_json, std::move(fluid), index);
+    if (index == name_vector.size()) name_vector.push_back(name);
+}
+
+void JSONFluidLibrary::load_index(const nlohmann::json& index, std::function<std::string(const std::string&)> provider) {
+    std::lock_guard<std::recursive_mutex> lock(mutex);
+    // Only metadata is needed for FluidsList and identifier resolution.
+    for (const auto& entry : index) {
+        CoolPropFluid fluid;
+        fluid.name = entry.at("NAME").get<std::string>();
+        fluid.CAS = entry.at("CAS").get<std::string>();
+        fluid.REFPROPname = entry.at("REFPROP_NAME").get<std::string>();
+        fluid.aliases = cpjson::get_string_array(entry.at("ALIASES"));
+        const auto slot = name_vector.size();
+        register_identifiers(fluid, slot);
+        pending.emplace(slot, entry.at("file").get<std::string>());
+        name_vector.push_back(fluid.name);
+    }
+    data_provider = std::move(provider);
+    _is_empty = false;
+}
+
+void JSONFluidLibrary::ensure_fluid_loaded(std::size_t index) {
+    auto it = pending.find(index);
+    if (it == pending.end()) return;
+    const std::string name = name_vector.at(index);
+    if (!loading.insert(index).second) {
+        throw ValueError(format("Recursive fluid data provider request for fluid [%s]", name.c_str()));
+    }
+    try {
+        const std::string bytes = data_provider(it->second);
+        auto json = cpjson::from_cbor(reinterpret_cast<const std::uint8_t*>(bytes.data()), bytes.size());
+        CoolPropFluid fluid = parse_fluid(json);
+        if (fluid.name != name) throw ValueError("Provider returned data for a different fluid");
+        insert_fluid(json, std::move(fluid), index);
+        loading.erase(index);
+    } catch (const std::exception& e) {
+        loading.erase(index);
+        throw ValueError(format("Unable to load external fluid [%s]: %s", name.c_str(), e.what()));
+    } catch (...) {
+        loading.erase(index);
+        throw ValueError(format("Unable to load external fluid [%s]: provider failed", name.c_str()));
+    }
+}
 
 JSONFluidLibrary& get_library() {
     ensure_library_loaded();
