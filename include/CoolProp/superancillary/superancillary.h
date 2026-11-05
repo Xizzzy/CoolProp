@@ -120,6 +120,10 @@ inline void balance_matrix(const Matrix& A, Matrix& Aprime, Matrix& D) {
 
 inline void companion_matrix_transposed(const Eigen::ArrayXd& coeffs, Eigen::MatrixXd& A) {
     auto N = coeffs.size() - 1;  // degree
+    // The colleague matrix below needs a degree of at least 2 (it sets A(1, 0) and A(N-2, N-1))
+    if (coeffs.size() < 3) {
+        throw std::invalid_argument("companion_matrix_transposed needs a degree of at least 2");
+    }
     if (A.rows() != N) {
         throw std::invalid_argument("A.rows() != N");
     }
@@ -136,7 +140,10 @@ inline void companion_matrix_transposed(const Eigen::ArrayXd& coeffs, Eigen::Mat
     }
 }
 inline void companion_matrix_transposed(const std::vector<double>& coeffs, Eigen::MatrixXd& A) {
-    Eigen::ArrayXd coeffs_ = Eigen::Map<const Eigen::ArrayXd>(&coeffs[0], coeffs.size());
+    if (coeffs.size() < 3) {
+        throw std::invalid_argument("companion_matrix_transposed needs a degree of at least 2");
+    }
+    Eigen::ArrayXd coeffs_ = Eigen::Map<const Eigen::ArrayXd>(coeffs.data(), coeffs.size());
     return companion_matrix_transposed(coeffs_, A);
 }
 
@@ -520,7 +527,21 @@ struct ChebyshevApproximation1D
                 }
             }
             if (ilastnonzero != static_cast<int>(cd.size() - 1)) {
-                cd = head(cd, ilastnonzero);
+                // keep the last nonzero coefficient (head takes the first N); none nonzero leaves the first, zero
+                cd = head(cd, ilastnonzero + 1);
+            }
+            // A derivative of degree 0 (a constant, or zero) has no root, one of degree 1 a single root: the colleague
+            // matrix below needs a degree of at least 2 (with fewer coefficients it was written out of bounds, and an
+            // empty derivative made a matrix of size -1)
+            if (cd.size() < 2 || std::abs(cd[cd.size() - 1]) == 0) {
+                continue;
+            }
+            if (cd.size() == 2) {
+                const double re_n11 = -cd[0] / cd[1];
+                if (re_n11 >= -1 && re_n11 <= 1) {
+                    x_at_extrema.push_back(((expan.xmax() - expan.xmin()) * re_n11 + (expan.xmax() + expan.xmin())) / 2.0);
+                }
+                continue;
             }
             // Then do eigenvalue rootfinding after balancing
             // Define working buffers here to avoid allocations all over the place
