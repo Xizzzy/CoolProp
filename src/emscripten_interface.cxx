@@ -51,42 +51,50 @@ std::vector<double> js_array_to_vec(const val& arr) {
 }
 }  // namespace
 
-// Catch raw host exceptions before returning across the JavaScript/C++ boundary,
-// so native cleanup runs and failed fluid requests remain retryable. (Not named invoke_*: Emscripten
-// takes imports with that prefix for its JavaScript exception-handling trampolines.)
-EM_JS(EM_VAL, call_fluid_data_provider, (EM_VAL provider, EM_VAL file), {
+// The host's fluid data provider is called and checked from plain JavaScript (EM_JS), not through embind's val
+// methods: their invokers (__emval_create_invoker) are built with new Function, which a Content-Security-Policy
+// without 'unsafe-eval' refuses. Host exceptions are caught here, before returning across the boundary, so native
+// cleanup runs and a failed request stays retryable. (Not named invoke_*: Emscripten takes imports with that
+// prefix for its JavaScript exception-handling trampolines.) Returns the byte length, -1 for a result that is not a
+// Uint8Array, -2 when the provider threw; the bytes are kept for fluid_data_copy.
+EM_JS(int, fluid_data_fetch, (EM_VAL provider, const char* file), {
     try {
-        const bytes = Emval.toValue(provider)(Emval.toValue(file));
-        if (!(bytes instanceof Uint8Array)) {
-            return Emval.toHandle({error: "Fluid data provider must return Uint8Array"});
-        }
-        // Own the bytes before allocating native memory, which may grow the heap
-        // and detach a Uint8Array returned as a view into WebAssembly memory.
-        return Emval.toHandle({data: new Uint8Array(bytes)});
+        const bytes = Emval.toValue(provider)(UTF8ToString(file));
+        // A Uint8Array of any realm (a worker's, Node's Buffer, another context's).
+        if (!(bytes instanceof Uint8Array) && Object.prototype.toString.call(bytes) !== "[object Uint8Array]") return -1;
+        // An own copy, before native memory is allocated for it (a view into WebAssembly memory would detach).
+        Module["__fluidData"] = new Uint8Array(bytes);
+        return Module["__fluidData"].length;
     } catch (error) {
-        return Emval.toHandle({error: "JavaScript fluid data provider threw"});
+        return -2;
     }
+});
+EM_JS(void, fluid_data_copy, (char* destination), {
+    HEAPU8.set(Module["__fluidData"], destination);
+    Module["__fluidData"] = null;
+});
+// 0 for null or undefined, 1 for a function, 2 for anything else (no val method: see above).
+EM_JS(int, fluid_data_provider_kind, (EM_VAL provider), {
+    const f = Emval.toValue(provider);
+    return f === null || f === undefined ? 0 : typeof f === "function" ? 1 : 2;
 });
 
 // The captured val keeps the host function alive for the provider's lifetime.
 void set_fluid_data_provider_js(val f) {
-    if (f.isNull() || f.isUndefined()) {
+    const int kind = fluid_data_provider_kind(f.as_handle());
+    if (kind == 0) {
         CoolProp::set_fluid_data_provider({});
         return;
     }
-    if (f.typeOf().as<std::string>() != "function") {
+    if (kind != 1) {
         throw CoolProp::ValueError("Fluid data provider must be a function returning Uint8Array");
     }
     CoolProp::set_fluid_data_provider([f](const std::string& file) -> std::string {
-        val filename(file);
-        val result = val::take_ownership(call_fluid_data_provider(f.as_handle(), filename.as_handle()));
-        if (result.hasOwnProperty("error")) {
-            throw CoolProp::ValueError(result["error"].as<std::string>());
-        }
-        val bytes = result["data"];
-        std::string data(bytes["byteLength"].as<std::size_t>(), '\0');
-        val destination = val(typed_memory_view(data.size(), reinterpret_cast<unsigned char*>(data.data())));
-        destination.call<void>("set", bytes);
+        const int n = fluid_data_fetch(f.as_handle(), file.c_str());
+        if (n == -1) throw CoolProp::ValueError("Fluid data provider must return Uint8Array");
+        if (n < 0) throw CoolProp::ValueError("JavaScript fluid data provider threw");
+        std::string data(static_cast<std::size_t>(n), '\0');
+        if (n > 0) fluid_data_copy(data.data());
         return data;
     });
 }
